@@ -6,82 +6,77 @@ import time
 import streamlit as st
 import json
 import hashlib
+from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import io
+from openpyxl import Workbook
 
 st.set_page_config(page_title="Sector-Wise Stock Financials", layout="wide")
 
-API_KEY = "874WVCYGCPDM9YVS"
+API_KEY = "QLSJQ"
 data_folder = r"./StockAnalysisData"
+cache_dir = r"./StockAnalysisData/api_cache"
+os.makedirs(cache_dir, exist_ok=True)
 
-# Step 1: Read 2 companies per sector
+last_updated_map = {}
 sector_symbols_map = {}
-
 excel_files = glob.glob(os.path.join(data_folder, "sp500_*_stocks.xlsx"))
-
 for file in excel_files:
     try:
         df = pd.read_excel(file)
         sector = os.path.basename(file).replace("sp500_", "").replace("_stocks.xlsx", "").replace("_", " ")
-        #load all symbols from the file
         symbols = df['Symbol'].dropna().tolist()
-        #symbols = df['Symbol'].dropna().tolist()[:2]
-        
         if symbols:
             sector_symbols_map[sector] = symbols
-            print(f"✅ Loaded 2 symbols from {sector}: {symbols}")
     except Exception as e:
         print(f"⚠️ Skipping {file}: {e}")
 
-# Flatten all symbols
 all_symbols = [symbol for symbol_list in sector_symbols_map.values() for symbol in symbol_list]
 
-# Alpha Vantage functions
-
-# Create a persistent cache folder
-cache_dir = r"./StockAnalysisData/api_cache"
-os.makedirs(cache_dir, exist_ok=True)
+refresh_data = st.sidebar.checkbox("🔁 Force Refresh (Ignore Cache)", value=False)
+min_market_cap = st.sidebar.number_input("🔍 Filter by Min Market Cap (Bn)", value=0.0, step=0.1)
+pe_ratio_filter = st.sidebar.number_input("📊 Max PE Ratio (0 to ignore)", value=0.0, step=0.1)
+profit_margin_filter = st.sidebar.number_input("💰 Min Profit Margin (0 to ignore)", value=0.0, step=0.1)
+eps_filter = st.sidebar.number_input("📈 Min EPS (0 to ignore)", value=0.0, step=0.1)
+peg_filter = st.sidebar.number_input("📉 Max PEG (0 to ignore)", value=0.0, step=0.1)
+debt_to_equity_max = st.sidebar.number_input("⚖️ Max Debt to Equity Ratio (0 to ignore)", value=0.0, step=0.1)
+min_ebitda = st.sidebar.number_input("🏦 Min EBITDA (Bn)", value=0.0, step=0.1, help="Earnings before interest, taxes, depreciation, and amortization")
+min_gross_profit_ttm = st.sidebar.number_input("💹 Min Gross Profit TTM (Bn)", value=0.0, step=0.1)
 
 @st.cache_data(ttl=86400)
 def fetch_data(function, symbol):
-    url = "https://www.alphavantage.co/query"
-    params = {"function": function, "symbol": symbol, "apikey": API_KEY}
-    
-    # Generate a unique filename for this API request
     key_string = f"{function}_{symbol}"
     filename = os.path.join(cache_dir, hashlib.md5(key_string.encode()).hexdigest() + ".json")
-
-    # If file exists, load from local cache
-    if os.path.exists(filename):
-        with open(filename, 'r') as f:
-            cached_data = json.load(f)
-            return cached_data
-
-    # Try fetching fresh data
-    response = requests.get(url, params=params)
+    if not refresh_data and os.path.exists(filename):
+        file_mtime = os.path.getmtime(filename)
+        file_age = time.time() - file_mtime
+        last_updated_map[symbol] = datetime.fromtimestamp(file_mtime).strftime("%Y-%m-%d %H:%M:%S")
+        if file_age < 86400:
+            try:
+                with open(filename, 'r') as f:
+                    return json.load(f)
+            except:
+                pass
+    url = "https://www.alphavantage.co/query"
+    params = {"function": function, "symbol": symbol, "apikey": API_KEY}
     try:
+        response = requests.get(url, params=params)
         data = response.json()
-    except Exception as e:
-        st.warning(f"⚠️ Error parsing response for {symbol}. Using cached version if available.")
+    except:
+        return {}
+    if "Information" in data and "limit" in data["Information"].lower():
         if os.path.exists(filename):
             with open(filename, 'r') as f:
                 return json.load(f)
         return {}
-
-    # Check if we hit the API limit
-    if "Information" in data and "rate limit" in data["Information"].lower():
-        st.warning(f"⚠️ API rate limit hit for {symbol}. Using cached data.")
-        if os.path.exists(filename):
-            with open(filename, 'r') as f:
-                return json.load(f)
-        return {}
-
-    # Save to cache
-    with open(filename, 'w') as f:
-        json.dump(data, f)
-
+    try:
+        with open(filename, 'w') as f:
+            json.dump(data, f)
+        last_updated_map[symbol] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    except:
+        pass
     return data
 
-
-@st.cache_data(ttl=86400)
 def get_last_7_prices(symbol):
     data = fetch_data("TIME_SERIES_DAILY_ADJUSTED", symbol)
     ts = data.get("Time Series (Daily)", {})
@@ -92,7 +87,6 @@ def get_last_7_prices(symbol):
             prices.append(float(price))
     return prices
 
-
 def extract_quarterly(data, keys, prefix):
     result = {}
     if "quarterlyReports" in data:
@@ -102,106 +96,109 @@ def extract_quarterly(data, keys, prefix):
                 result[col] = report.get(key, None)
     return result
 
+def passes_filters(result):
+    return (
+        result["Market Cap (USD Bn)"] >= min_market_cap and
+        (pe_ratio_filter == 0 or result["PE Ratio"] <= pe_ratio_filter) and
+        (profit_margin_filter == 0 or result["ProfitMargin"] >= profit_margin_filter) and
+        (eps_filter == 0 or result["EPS"] >= eps_filter) and
+        (peg_filter == 0 or result["PEG"] <= peg_filter) and
+        (debt_to_equity_max == 0 or (
+            result.get("Debt to Equity Ratio") is not None and
+            result["Debt to Equity Ratio"] <= debt_to_equity_max
+        )) and
+        (min_ebitda == 0 or result.get("EBITDA (Bn)", 0) >= min_ebitda) and
+        (min_gross_profit_ttm == 0 or result.get("Gross Profit TTM (Bn)", 0) >= min_gross_profit_ttm)
+    )
 
-@st.cache_data(ttl=86400)
+def process_symbol(symbol):
+    overview = fetch_data("OVERVIEW", symbol)
+    income_q = fetch_data("INCOME_STATEMENT", symbol)
+    balance_q = fetch_data("BALANCE_SHEET", symbol)
+    prices = get_last_7_prices(symbol)
+    try:
+        market_cap = float(overview.get("MarketCapitalization", 0)) / 1e9
+        pe_ratio = float(overview.get("PERatio", 0))
+        profit_margin = float(overview.get("ProfitMargin", 0)) * 100
+        eps = float(overview.get("EPS", 0))
+        peg = float(overview.get("PEGRatio", 0))
+        ebitda = float(overview.get("EBITDA", 0)) / 1e9
+        gross_profit_ttm = float(overview.get("GrossProfitTTM", 0)) / 1e9
+        book_value = float(overview.get("BookValue", 0))
+    except:
+        market_cap = pe_ratio = profit_margin = eps = peg = ebitda = gross_profit_ttm = book_value = 0
+    row = {
+        "Company Name": overview.get("Name", symbol),
+        "Symbol": symbol,
+        "Sector": overview.get("Sector"),
+        "Industry": overview.get("Industry"),
+        "Market Cap (USD Bn)": market_cap,
+        "Debt to Equity Ratio": None,
+        "PE Ratio": pe_ratio,
+        "EPS": eps,
+        "PEG": peg,
+        "ProfitMargin": profit_margin,
+        "BookValue": book_value,
+        "PriceToBookRatio": overview.get("PriceToBookRatio"),
+        "EBITDA (Bn)": ebitda,
+        "Gross Profit TTM (Bn)": gross_profit_ttm,
+        "Last Updated": last_updated_map.get(symbol, "Unknown")
+    }
+    for i, p in enumerate(prices):
+        row[f"Price_Day_{i+1}"] = p
+    row.update({k: (float(v)/1e6 if v not in [None, 'None'] else None) for k, v in extract_quarterly(income_q, ["totalRevenue", "grossProfit", "netIncome"], "Income").items()})
+    row.update({k: (float(v)/1e6 if v not in [None, 'None'] else None) for k, v in extract_quarterly(balance_q, ["totalAssets", "totalLiabilities", "totalShareholderEquity", "cashAndCashEquivalentsAtCarryingValue"], "Balance").items()})
+    try:
+        liabilities = float(row.get("Balance_totalLiabilities_Q1", 0))
+        equity = float(row.get("Balance_totalShareholderEquity_Q1", 1))
+        row["Debt to Equity Ratio"] = round(liabilities / equity, 2)
+    except:
+        row["Debt to Equity Ratio"] = None
+    return row
+
 def get_full_data(symbols):
     all_data = []
-    for symbol in symbols:
-        st.write(f"🔍 Processing `{symbol}`")
-        overview = fetch_data("OVERVIEW", symbol)
-        income_q = fetch_data("INCOME_STATEMENT", symbol)
-        balance_q = fetch_data("BALANCE_SHEET", symbol)
-        prices = get_last_7_prices(symbol)
-
-        time.sleep(12)  # Respect rate limit
-
-        row = {
-            "Company Name": overview.get("Name", symbol),
-            "Symbol": symbol,
-            "Sector": overview.get("Sector"),
-            "Industry": overview.get("Industry"),
-            "Market Cap (USD Bn)": round(float(overview.get("MarketCapitalization", 0)) / 1e9, 2),
-            "PE Ratio": overview.get("PERatio"),
-            "EPS": overview.get("EPS"),
-            "PEG": overview.get("PEGRatio"),
-            "ProfitMargin": overview.get("ProfitMargin"),
-            "OperatingMarginTTM": overview.get("OperatingMarginTTM"),
-            "BookValue": overview.get("BookValue"),
-            "PriceToBookRatio": overview.get("PriceToBookRatio")
-        }
-
-        for i, p in enumerate(prices):
-            row[f"Price_Day_{i+1}"] = p
-
-        # Add income statement
-        income_keys = ["totalRevenue", "grossProfit", "netIncome"]
-        row.update(extract_quarterly(income_q, income_keys, "Income"))
-
-        # Add balance sheet
-        balance_keys = ["totalAssets", "totalLiabilities", "totalShareholderEquity", "cashAndCashEquivalentsAtCarryingValue"]
-        row.update(extract_quarterly(balance_q, balance_keys, "Balance"))
-
-        # Add Debt to Equity Ratio
-        try:
-            liabilities = float(row.get("Balance_totalLiabilities_Q1", 0))
-            equity = float(row.get("Balance_totalShareholderEquity_Q1", 1))  # avoid div by zero
-            row["Debt to Equity Ratio"] = round(liabilities / equity, 2)
-        except:
-            row["Debt to Equity Ratio"] = None
-
-        all_data.append(row)
-
+    progress = st.progress(0)
+    max_workers = 10
+    completed = 0
+    total = len(symbols)
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(process_symbol, symbol): symbol for symbol in symbols}
+        for future in as_completed(futures):
+            try:
+                result = future.result()
+                if passes_filters(result):
+                    all_data.append(result)
+            except Exception as e:
+                st.error(f"Error processing {futures[future]}: {e}")
+            completed += 1
+            progress.progress(completed / total)
+    progress.empty()
     return pd.DataFrame(all_data)
 
-
-# Step 2: Fetch all data
 df = get_full_data(all_symbols)
-
-# Step 3: Streamlit UI
-st.title("📊 US Stocks – Sector-wise Financial Dashboard")
-
+st.title("📊 US Stocks – Financial Dashboard")
 if df.empty:
     st.warning("No data found.")
 else:
-    # 🔍 Global Search Field
-    search = st.text_input("🔍 Search Stock by Company Name or Symbol")
-
-    # Apply Global Search Filter
-    if search:
-        search_lower = search.lower()
-        filtered_df = df[
-            df["Company Name"].fillna("").str.lower().str.contains(search_lower) |
-            df["Symbol"].fillna("").str.lower().str.contains(search_lower)
-        ]
-        st.write(f"📎 Showing {len(filtered_df)} results for '{search}'")
-        st.dataframe(filtered_df, use_container_width=True)
+    csv = df.to_csv(index=False).encode('utf-8')
+    st.download_button("📥 Download as CSV", data=csv, file_name="US_Stocks_Financials.csv", mime="text/csv")
+    excel_buffer = io.BytesIO()
+    df.to_excel(excel_buffer, index=False, engine='openpyxl')
+    st.download_button("📘 Download as Excel", data=excel_buffer.getvalue(), file_name="US_Stocks_Financials.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    if "Sector" in df.columns:
+        sectors = sorted(df['Sector'].dropna().unique())
+        tabs = st.tabs(sectors)
+        for tab, sector in zip(tabs, sectors):
+            with tab:
+                st.subheader(f"📁 Sector: {sector}")
+                sector_df = df[df['Sector'] == sector]
+                search = st.text_input(f"Search in {sector}", key=sector)
+                if search:
+                    sector_df = sector_df[
+                        sector_df["Company Name"].str.contains(search, case=False, na=False) |
+                        sector_df["Symbol"].str.contains(search, case=False, na=False)
+                    ]
+                st.dataframe(sector_df, use_container_width=True)
     else:
-        st.write("📎 Showing all stocks")
-        st.dataframe(df, use_container_width=True)
-    
-#else:
-    # Get sectors from dataframe
-    
-if "Sector" in df.columns:
-    sectors = sorted(df['Sector'].dropna().unique())
-else:
-    sectors = []
-
-if sectors:
-    tabs = st.tabs(sectors)
-    for tab, sector in zip(tabs, sectors):
-        with tab:
-            st.subheader(f"📁 Sector: {sector}")
-            sector_df = df[df['Sector'] == sector]
-
-            # Search within sector
-            search = st.text_input(f"Search within {sector}", key=sector)
-            if search:
-                sector_df = sector_df[
-                    sector_df["Company Name"].str.contains(search, case=False, na=False) |
-                    sector_df["Symbol"].str.contains(search, case=False, na=False)
-                ]
-
-            st.dataframe(sector_df, use_container_width=True)
-else:
-    st.warning("No valid sector data found in the dataset.")
+        st.dataframe(df)
