@@ -7,6 +7,7 @@ import streamlit as st
 import io
 import json
 import hashlib
+import streamlit as st
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -153,7 +154,7 @@ def get_full_data(symbols):
 
     st.success(f"✅ Returned {len(all_data)} valid rows")
     if missing_symbols:
-        st.warning(f"⚠️ Missing or filtered out: {', '.join(missing_symbols[:20])}... (Total: {len(missing_symbols)})")
+        #st.warning(f"⚠️ Missing or filtered out: {', '.join(missing_symbols[:20])}... (Total: {len(missing_symbols)})")
         try:
             with open("missingsymbols.txt", "w") as f:
                 f.write("\n".join(missing_symbols))
@@ -162,16 +163,29 @@ def get_full_data(symbols):
 
     return pd.DataFrame(all_data)
 
-# Fetch data
+# --- UI Section ---
 st.markdown("""
-    <style>
-        .main .block-container { padding-top: 1rem; }
-        .st-emotion-cache-1y4p8pa { background-color: #f8f9fa; border-radius: 8px; padding: 1rem; }
-        .st-emotion-cache-1avcm0n, .st-emotion-cache-1p1jmeh { font-weight: 600; color: #2c3e50; }
-    </style>
+    <h1 style='font-family: "Segoe UI", sans-serif; color: #1a1a1a; font-size: 42px; text-align: center; padding-bottom: 0.5rem;'>
+        📊 <span style='color: #0056b3;'>US Stock Sector Analysis Dashboard</span>
+    </h1>
+""", unsafe_allow_html=True)
+st.markdown("""
+<style>
+    .main .block-container {
+        padding-top: 1rem;
+    }
+    .st-emotion-cache-1y4p8pa {
+        background-color: #f8f9fa;
+        border-radius: 8px;
+        padding: 1rem;
+    }
+    .st-emotion-cache-1avcm0n, .st-emotion-cache-1p1jmeh {
+        font-weight: 600;
+        color: #2c3e50;
+    }
+</style>
 """, unsafe_allow_html=True)
 
-st.title("📈 US Stock Sector Analysis")
 
 # Sidebar filters
 with st.sidebar:
@@ -181,11 +195,12 @@ with st.sidebar:
     market_cap_category = st.selectbox("Market Cap Category", ["All", "Small Cap (<2B)", "Mid Cap (2B-10B)", "Large Cap (>10B)"])
     st.caption("💡 Categorized by total market capitalization in USD billions.")
     pe_max = st.number_input("Max PE Ratio", min_value=0.0, value=100.0)
-    debt_to_equity_max = st.number_input("Max Debt to Equity Ratio", min_value=0.0, value=2.0)
+    debt_to_equity_max = st.number_input("Max Debt to Equity Ratio", min_value=0.0, value=100.0)
     profit_margin_min = st.number_input("Min Profit Margin (%)", min_value=-100.0, value=0.0)
     gross_margin_min = st.number_input("Min Gross Margin (%)", min_value=-100.0, value=0.0)
     st.markdown("---")
     st.markdown("[Download Full Excel Below ⬇️](#-download-excel)")
+    
 full_df = get_full_data(all_symbols)
 df = full_df.copy()
 
@@ -194,7 +209,7 @@ df["MarketCapitalization"] = pd.to_numeric(df["MarketCapitalization"], errors='c
 df["PERatio"] = pd.to_numeric(df["PERatio"], errors='coerce')
 df["Debt to Equity Ratio"] = pd.to_numeric(df["Debt to Equity Ratio"], errors='coerce')
 df["ProfitMargin"] = pd.to_numeric(df["ProfitMargin"], errors='coerce') * 100
-df["GrossProfitTTM"] = pd.to_numeric(df["GrossProfitTTM"], errors='coerce')
+df["GrossProfitTTM"] = pd.to_numeric(df["GrossProfitTTM"], errors='coerce')/ 1e9
 df = df.rename(columns={"MarketCapitalization": "Market Cap (Bn)", "PERatio": "PE Ratio", "ProfitMargin": "Profit Margin (%)"})
 
 # Apply filters
@@ -257,8 +272,9 @@ else:
         st.write(f"📎 Showing {len(filtered_df)} results for '{search}'")
         st.dataframe(filtered_df, use_container_width=True)
     else:
-        st.write("📎 Showing all stocks")
-        st.markdown("### 📋 Key Financial Metrics")
+        #st.write("📎 Showing all stocks")
+        st.markdown("### 📊 Showing all US stocks")
+      
 st.dataframe(
     df.rename(columns={
         "PE Ratio": "📈 PE Ratio",
