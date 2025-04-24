@@ -166,7 +166,7 @@ def get_full_data(symbols):
 # --- UI Section ---
 st.markdown("""
     <h1 style='font-family: "Segoe UI", sans-serif; color: #1a1a1a; font-size: 42px; text-align: center; padding-bottom: 0.5rem;'>
-        📊 <span style='color: #0056b3;'>US Stock Sector Analysis Dashboard</span>
+        📊 <span style='color: #0056b3;'>US Stock Sector Analysis Dashboard*</span>
     </h1>
 """, unsafe_allow_html=True)
 st.markdown("""
