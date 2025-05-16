@@ -26,7 +26,7 @@ def fetch_and_save(function, symbol):
     except Exception:
         st.error(f"❌ Failed to parse response for {function}")
         return None
-
+# rate limit check
     # Handle rate limit
     if "Information" in data and "limit" in data["Information"].lower():
         st.warning(f"⚠️ Rate limit hit for {function}")
